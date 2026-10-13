@@ -43,6 +43,15 @@ class ShakaCustomPlayer {
     this.qualityList = document.getElementById('qualityList');
     this.speedList = document.getElementById('speedList');
 
+    // TMDB Connector Elements
+    this.defaultTmdbApiKey = 'd4867796b2a15337894d2b42fa582ddb';
+    this.tmdbIdInput = document.getElementById('tmdbIdInput');
+    this.tmdbSeasonInput = document.getElementById('tmdbSeasonInput');
+    this.tmdbEpisodeInput = document.getElementById('tmdbEpisodeInput');
+    this.tmdbApplyBtn = document.getElementById('tmdbApplyBtn');
+    this.tmdbPresetAos = document.getElementById('tmdbPresetAos');
+    this.tmdbPresetMoving = document.getElementById('tmdbPresetMoving');
+
     this.player = null;
     this.isDragging = false;
     this.hideControlsTimer = null;
@@ -223,6 +232,46 @@ class ShakaCustomPlayer {
       });
       this.speedList.appendChild(li);
     });
+
+    // TMDB Apply button
+    if (this.tmdbApplyBtn) {
+      this.tmdbApplyBtn.addEventListener('click', () => {
+        const id = this.tmdbIdInput.value.trim();
+        const season = this.tmdbSeasonInput.value.trim();
+        const ep = this.tmdbEpisodeInput.value.trim();
+        if (!id) {
+          this.showToast('Masukkan ID TMDB terlebih dahulu');
+          return;
+        }
+        this.connectTMDB({
+          id: id,
+          season: season ? parseInt(season, 10) : undefined,
+          episode: ep ? parseInt(ep, 10) : undefined
+        });
+        this.closeSettings();
+      });
+    }
+
+    // TMDB Quick Presets
+    if (this.tmdbPresetAos) {
+      this.tmdbPresetAos.addEventListener('click', () => {
+        this.tmdbIdInput.value = '135157';
+        this.tmdbSeasonInput.value = '1';
+        this.tmdbEpisodeInput.value = '1';
+        this.connectTMDB({ id: 135157, season: 1, episode: 1 });
+        this.closeSettings();
+      });
+    }
+
+    if (this.tmdbPresetMoving) {
+      this.tmdbPresetMoving.addEventListener('click', () => {
+        this.tmdbIdInput.value = '126485';
+        this.tmdbSeasonInput.value = '1';
+        this.tmdbEpisodeInput.value = '1';
+        this.connectTMDB({ id: 126485, season: 1, episode: 1 });
+        this.closeSettings();
+      });
+    }
   }
 
   openSettings() {
@@ -497,40 +546,66 @@ class ShakaCustomPlayer {
    * @param {number|string} params.season - Season number
    * @param {number|string} params.episode - Episode number
    */
-  async connectTMDB({ apiKey, id, season, episode }) {
-    if (!apiKey || !id) {
+  async connectTMDB({ apiKey, id, season, episode, type }) {
+    const key = apiKey || this.defaultTmdbApiKey;
+    if (!key || !id) {
       console.warn('TMDB: apiKey and id are required');
       return;
     }
 
     try {
       this.showToast('Menghubungkan ke TMDB...');
-      
-      // Ambil detail series
-      const seriesRes = await fetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${apiKey}&language=id-ID`);
-      const seriesData = await seriesRes.json();
-      const seriesName = seriesData.name || seriesData.original_name;
 
-      // Ambil detail episode jika ada season & episode
-      if (season !== undefined && episode !== undefined) {
-        const epRes = await fetch(`https://api.themoviedb.org/3/tv/${id}/season/${season}/episode/${episode}?api_key=${apiKey}&language=id-ID`);
-        const epData = await epRes.json();
-        
-        const epTitle = epData.name ? `${seriesName} - ${epData.name}` : seriesName;
-        this.setMetadata({
-          title: epTitle,
-          season: season,
-          episode: episode
-        });
-      } else {
+      if (type === 'movie' || (season === undefined && episode === undefined)) {
         // Mode Movie
-        const movieRes = await fetch(`https://api.themoviedb.org/3/movie/${id}?api_key=${apiKey}&language=id-ID`);
+        const movieRes = await fetch(`https://api.themoviedb.org/3/movie/${id}?api_key=${key}&language=id-ID`);
         const movieData = await movieRes.json();
+        const movieTitle = movieData.title || movieData.original_title || 'Movie';
+        
         this.setMetadata({
-          title: movieData.title || seriesName,
+          title: movieTitle,
         });
+
+        if (movieData.backdrop_path) {
+          this.video.poster = `https://image.tmdb.org/t/p/original${movieData.backdrop_path}`;
+        }
+        this.showToast(`TMDB: ${movieTitle}`);
+      } else {
+        // Mode Series / TV
+        const seriesRes = await fetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${key}&language=id-ID`);
+        const seriesData = await seriesRes.json();
+        const seriesName = seriesData.name || seriesData.original_name || 'Series';
+
+        if (season !== undefined && episode !== undefined) {
+          const epRes = await fetch(`https://api.themoviedb.org/3/tv/${id}/season/${season}/episode/${episode}?api_key=${key}&language=id-ID`);
+          const epData = await epRes.json();
+          
+          const epName = epData.name && !epData.name.startsWith('Episode') ? ` - ${epData.name}` : '';
+          const fullTitle = `${seriesName}${epName}`;
+
+          this.setMetadata({
+            title: fullTitle,
+            season: season,
+            episode: episode
+          });
+
+          if (epData.still_path) {
+            this.video.poster = `https://image.tmdb.org/t/p/original${epData.still_path}`;
+          } else if (seriesData.backdrop_path) {
+            this.video.poster = `https://image.tmdb.org/t/p/original${seriesData.backdrop_path}`;
+          }
+
+          this.showToast(`TMDB: ${seriesName} (S${season} E${episode})`);
+        } else {
+          this.setMetadata({
+            title: seriesName,
+          });
+          if (seriesData.backdrop_path) {
+            this.video.poster = `https://image.tmdb.org/t/p/original${seriesData.backdrop_path}`;
+          }
+          this.showToast(`TMDB: ${seriesName}`);
+        }
       }
-      this.showToast('Metadata TMDB terpasang!');
     } catch (err) {
       console.error('TMDB Error:', err);
       this.showToast('Gagal mengambil data dari TMDB');
@@ -545,6 +620,7 @@ class ShakaCustomPlayer {
     const episode = params.get('episode');
     const tmdbKey = params.get('tmdb_key');
     const tmdbId = params.get('tmdb_id');
+    const tmdbMovie = params.get('tmdb_movie');
 
     if (src) this.streamUri = src;
 
@@ -556,12 +632,18 @@ class ShakaCustomPlayer {
       });
     }
 
-    if (tmdbKey && tmdbId) {
+    if (tmdbMovie) {
+      this.connectTMDB({
+        apiKey: tmdbKey,
+        id: tmdbMovie,
+        type: 'movie'
+      });
+    } else if (tmdbId) {
       this.connectTMDB({
         apiKey: tmdbKey,
         id: tmdbId,
-        season: season || 1,
-        episode: episode || 1
+        season: season ? parseInt(season, 10) : 1,
+        episode: episode ? parseInt(episode, 10) : 1
       });
     }
   }
