@@ -41,16 +41,22 @@ class ShakaCustomPlayer {
     this.settingsMenu = document.getElementById('settingsMenu');
     this.settingsCloseBtn = document.getElementById('settingsCloseBtn');
     this.qualityList = document.getElementById('qualityList');
+    this.audioList = document.getElementById('audioList');
+    this.subtitleList = document.getElementById('subtitleList');
     this.speedList = document.getElementById('speedList');
+    this.subFileInput = document.getElementById('subFileInput');
+    this.videoFileInput = document.getElementById('videoFileInput');
 
-    // TMDB Connector Elements
-    this.defaultTmdbApiKey = 'd4867796b2a15337894d2b42fa582ddb';
-    this.tmdbIdInput = document.getElementById('tmdbIdInput');
-    this.tmdbSeasonInput = document.getElementById('tmdbSeasonInput');
-    this.tmdbEpisodeInput = document.getElementById('tmdbEpisodeInput');
-    this.tmdbApplyBtn = document.getElementById('tmdbApplyBtn');
-    this.tmdbPresetAos = document.getElementById('tmdbPresetAos');
-    this.tmdbPresetMoving = document.getElementById('tmdbPresetMoving');
+    // Audio Language Selection State
+    this.manualAudioLanguage = null;
+    this.isManualAudioSelected = false;
+    this.isSelectingAudio = false;
+    this.isSwitchingAudio = false;
+
+    // Subtitle / Teks State
+    this.isSubtitleActive = false;
+    this.currentTextTrack = null;
+    this.subUri = null;
 
     this.player = null;
     this.isDragging = false;
@@ -72,6 +78,14 @@ class ShakaCustomPlayer {
     this.player = new shaka.Player();
     await this.player.attach(this.video);
 
+    // Konfigurasi prioritas audio: Bahasa Indonesia ('id') -> Bahasa Inggris ('en')
+    this.player.configure({
+      preferredAudio: [
+        { language: 'id' },
+        { language: 'en' }
+      ]
+    });
+
     // Listen for player errors
     this.player.addEventListener('error', (event) => this.onError(event.detail));
 
@@ -81,8 +95,19 @@ class ShakaCustomPlayer {
     this.setupSettingsMenu();
     this.parseQueryParams();
 
-    // Load initial stream (Can be modified or queried from URL)
-    const initialStream = this.streamUri || 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd';
+    // Load initial stream (Can be modified, local video file, or queried from URL)
+    let initialStream = this.streamUri;
+    if (!initialStream) {
+      try {
+        const vCheck = await fetch('alchemy_of_souls_s01e01.mp4', { method: 'HEAD' });
+        if (vCheck.ok) {
+          initialStream = 'alchemy_of_souls_s01e01.mp4';
+        }
+      } catch (e) {}
+    }
+    if (!initialStream) {
+      initialStream = 'https://storage.googleapis.com/shaka-demo-assets/angel-one/dash.mpd';
+    }
     this.loadStream(initialStream);
   }
 
@@ -125,9 +150,80 @@ class ShakaCustomPlayer {
     this.container.addEventListener('touchstart', () => this.wakeControls(), { passive: true });
     this.wakeControls();
 
-    // Track changes (update resolution options)
-    this.player.addEventListener('adaptation', () => this.refreshQualityList());
-    this.player.addEventListener('variantchanged', () => this.refreshQualityList());
+    // Track changes (update resolution & audio options)
+    this.player.addEventListener('adaptation', () => {
+      this.refreshQualityList();
+      this.refreshAudioList();
+    });
+    this.player.addEventListener('variantchanged', () => {
+      this.refreshQualityList();
+      this.refreshAudioList();
+    });
+    this.player.addEventListener('audiotrackschanged', () => {
+      this.refreshAudioList();
+    });
+    this.player.addEventListener('trackschanged', () => {
+      this.applyAudioSelection();
+      this.refreshQualityList();
+      this.refreshAudioList();
+      this.refreshSubtitleList();
+    });
+    this.player.addEventListener('texttrackschanged', () => {
+      this.refreshSubtitleList();
+    });
+    this.player.addEventListener('textchanged', () => {
+      this.refreshSubtitleList();
+    });
+
+    // File input listener for external subtitles
+    if (this.subFileInput) {
+      this.subFileInput.addEventListener('change', (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (file) {
+          this.loadSubtitleFromFile(file);
+          this.subFileInput.value = '';
+        }
+      });
+    }
+
+    // File input listener for local videos
+    if (this.videoFileInput) {
+      this.videoFileInput.addEventListener('change', (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (file) {
+          this.loadVideoFromFile(file);
+          this.videoFileInput.value = '';
+        }
+      });
+    }
+
+    // Drag & Drop external subtitle (.srt / .vtt) and video (.mp4 / .webm / .mkv) into player
+    this.container.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      this.container.classList.add('dragover');
+    });
+    this.container.addEventListener('dragleave', () => {
+      this.container.classList.remove('dragover');
+    });
+    this.container.addEventListener('drop', (e) => {
+      e.preventDefault();
+      this.container.classList.remove('dragover');
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+        const files = Array.from(e.dataTransfer.files);
+        const videoFile = files.find((f) => /\.(mp4|webm|mkv|mov|m4v)$/i.test(f.name));
+        const subFile = files.find((f) => /\.(srt|vtt)$/i.test(f.name));
+
+        if (videoFile) {
+          this.loadVideoFromFile(videoFile);
+        }
+        if (subFile) {
+          this.loadSubtitleFromFile(subFile);
+        }
+        if (!videoFile && !subFile) {
+          this.showToast('Format file tidak didukung (.mp4, .mkv, .srt, .vtt)');
+        }
+      }
+    });
   }
 
   setupKeyboardShortcuts() {
@@ -189,6 +285,13 @@ class ShakaCustomPlayer {
         this.showToast(this.video.muted ? '🔇 Muted' : '🔊 Unmuted');
         this.wakeControls();
       }
+
+      // 'c': Subtitle toggle
+      else if (key === 'c') {
+        e.preventDefault();
+        this.toggleSubtitle();
+        this.wakeControls();
+      }
     });
   }
 
@@ -233,42 +336,14 @@ class ShakaCustomPlayer {
       this.speedList.appendChild(li);
     });
 
-    // TMDB Apply button
-    if (this.tmdbApplyBtn) {
-      this.tmdbApplyBtn.addEventListener('click', () => {
-        const id = this.tmdbIdInput.value.trim();
-        const season = this.tmdbSeasonInput.value.trim();
-        const ep = this.tmdbEpisodeInput.value.trim();
-        if (!id) {
-          this.showToast('Masukkan ID TMDB terlebih dahulu');
-          return;
+    // Local Video Picker Button in Settings
+    const btnPickLocalVideo = document.getElementById('btnPickLocalVideo');
+    if (btnPickLocalVideo) {
+      btnPickLocalVideo.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.videoFileInput) {
+          this.videoFileInput.click();
         }
-        this.connectTMDB({
-          id: id,
-          season: season ? parseInt(season, 10) : undefined,
-          episode: ep ? parseInt(ep, 10) : undefined
-        });
-        this.closeSettings();
-      });
-    }
-
-    // TMDB Quick Presets
-    if (this.tmdbPresetAos) {
-      this.tmdbPresetAos.addEventListener('click', () => {
-        this.tmdbIdInput.value = '135157';
-        this.tmdbSeasonInput.value = '1';
-        this.tmdbEpisodeInput.value = '1';
-        this.connectTMDB({ id: 135157, season: 1, episode: 1 });
-        this.closeSettings();
-      });
-    }
-
-    if (this.tmdbPresetMoving) {
-      this.tmdbPresetMoving.addEventListener('click', () => {
-        this.tmdbIdInput.value = '126485';
-        this.tmdbSeasonInput.value = '1';
-        this.tmdbEpisodeInput.value = '1';
-        this.connectTMDB({ id: 126485, season: 1, episode: 1 });
         this.closeSettings();
       });
     }
@@ -276,11 +351,342 @@ class ShakaCustomPlayer {
 
   openSettings() {
     this.refreshQualityList();
+    this.refreshAudioList();
+    this.refreshSubtitleList();
     this.settingsMenu.classList.add('active');
   }
 
   closeSettings() {
     this.settingsMenu.classList.remove('active');
+  }
+
+  /**
+   * Normalisasi bahasa menggunakan Shaka LanguageUtils atau fallback aman
+   * @param {string} lang
+   * @return {string}
+   */
+  normalizeLanguage(lang) {
+    if (!lang || typeof lang !== 'string') return '';
+    try {
+      if (typeof shaka !== 'undefined' && shaka.util && shaka.util.LanguageUtils) {
+        return shaka.util.LanguageUtils.normalize(lang);
+      }
+    } catch (e) {}
+    const cleaned = lang.trim().toLowerCase().replace('_', '-');
+    const parts = cleaned.split('-');
+    const langCode = parts[0];
+    const region = parts[1] ? parts[1].toUpperCase() : '';
+    let mapped = langCode;
+    if (langCode === 'ind' || langCode === 'in') mapped = 'id';
+    else if (langCode === 'eng') mapped = 'en';
+    else if (langCode === 'ita') mapped = 'it';
+    return region ? `${mapped}-${region}` : mapped;
+  }
+
+  /**
+   * Mengambil kode bahasa dasar 2-huruf (misal: 'id-ID' -> 'id', 'en-US' -> 'en')
+   * @param {string} lang
+   * @return {string}
+   */
+  getBaseLanguage(lang) {
+    const norm = this.normalizeLanguage(lang);
+    if (!norm) return '';
+    try {
+      if (typeof shaka !== 'undefined' && shaka.util && shaka.util.LanguageUtils) {
+        return shaka.util.LanguageUtils.getBase(norm);
+      }
+    } catch (e) {}
+    return norm.split('-')[0].toLowerCase();
+  }
+
+  /**
+   * Mencari track audio yang cocok berdasarkan kode bahasa
+   * Mendukung pencocokan variasi regional ('id-ID' -> 'id', 'en-US' -> 'en')
+   * @param {!Array<shaka.extern.AudioTrack>} tracks
+   * @param {string} targetLang
+   * @return {?shaka.extern.AudioTrack}
+   */
+  findMatchingAudioTrack(tracks, targetLang) {
+    if (!tracks || !tracks.length || !targetLang) return null;
+    const targetNorm = this.normalizeLanguage(targetLang);
+    const targetBase = this.getBaseLanguage(targetLang);
+
+    // Filter semua kandidat yang cocok secara normalized maupun base language
+    const candidates = tracks.filter((t) => {
+      const l = this.normalizeLanguage(t.language || t.originalLanguage);
+      const b = this.getBaseLanguage(t.language || t.originalLanguage);
+      return (l && l.toLowerCase() === targetNorm.toLowerCase()) || (b && b === targetBase);
+    });
+
+    if (!candidates.length) return null;
+    if (candidates.length === 1) return candidates[0];
+
+    // Jika ada kandidat yang sedang aktif, pertahankan
+    const activeCandidate = candidates.find((t) => t.active);
+    if (activeCandidate) return activeCandidate;
+
+    // Jika ada beberapa kandidat (misal AAC dan Opus), utamakan yang cocok dengan mimeType/codec track aktif
+    const activeTrack = tracks.find((t) => t.active);
+    if (activeTrack) {
+      if (activeTrack.mimeType) {
+        const mimeMatch = candidates.find((t) => t.mimeType === activeTrack.mimeType);
+        if (mimeMatch) return mimeMatch;
+      }
+      if (activeTrack.codecs) {
+        const codecMatch = candidates.find((t) => t.codecs === activeTrack.codecs);
+        if (codecMatch) return codecMatch;
+      }
+    }
+
+    return candidates[0];
+  }
+
+  /**
+   * Menerapkan aturan seleksi audio:
+   * 1. Jika ada pilihan manual dari pengguna dan track masih tersedia -> pertahankan.
+   * 2. Prioritas 1: Bahasa Indonesia ('id', 'id-ID', 'ind', dll).
+   * 3. Prioritas 2: Bahasa Inggris ('en', 'en-US', 'eng', dll).
+   * 4. Prioritas 3: Pilihan default provider (primary track atau track aktif).
+   */
+  applyAudioSelection() {
+    if (!this.player || this.isSelectingAudio) return;
+    this.isSelectingAudio = true;
+
+    try {
+      const tracks = this.player.getAudioTracks();
+      if (!tracks || !tracks.length) return;
+
+      const activeTrack = tracks.find((t) => t.active);
+
+      // 1. Pertahankan pilihan manual pengguna jika masih tersedia di manifest
+      if (this.isManualAudioSelected && this.manualAudioLanguage) {
+        // Jika track aktif saat ini SUDAH cocok dengan bahasa pilihan pengguna, tidak perlu switch ulang
+        if (activeTrack && this.getBaseLanguage(activeTrack.language || activeTrack.originalLanguage) === this.getBaseLanguage(this.manualAudioLanguage)) {
+          return;
+        }
+
+        const manualTrack = this.findMatchingAudioTrack(tracks, this.manualAudioLanguage);
+        if (manualTrack) {
+          if (!manualTrack.active) {
+            this.player.selectAudioTrack(manualTrack, /* safeMargin= */ 0);
+          }
+          return;
+        }
+        // Jika track pilihan manual sudah tidak ada di manifest baru, fallback ke auto
+      }
+
+      // 2. Prioritas 1: Bahasa Indonesia
+      const idTrack = this.findMatchingAudioTrack(tracks, 'id');
+      if (idTrack) {
+        if (!idTrack.active) {
+          this.player.selectAudioTrack(idTrack, /* safeMargin= */ 0);
+        }
+        return;
+      }
+
+      // 3. Prioritas 2: Bahasa Inggris
+      const enTrack = this.findMatchingAudioTrack(tracks, 'en');
+      if (enTrack) {
+        if (!enTrack.active) {
+          this.player.selectAudioTrack(enTrack, /* safeMargin= */ 0);
+        }
+        return;
+      }
+
+      // 4. Prioritas 3: Default provider (track dengan primary: true atau aktif)
+      const primaryTrack = tracks.find((t) => t.primary);
+      if (primaryTrack && !primaryTrack.active && !activeTrack) {
+        this.player.selectAudioTrack(primaryTrack, /* safeMargin= */ 0);
+      }
+    } catch (err) {
+      console.warn('Error saat auto-seleksi audio track:', err);
+    } finally {
+      this.isSelectingAudio = false;
+    }
+  }
+
+  /**
+   * Menghasilkan label teks ramah untuk track audio
+   * @param {shaka.extern.AudioTrack} track
+   * @return {string}
+   */
+  getAudioTrackDisplayLabel(track) {
+    const langNames = {
+      'id': 'Indonesia',
+      'in': 'Indonesia',
+      'en': 'English',
+      'it': 'Italiano',
+      'es': 'Español',
+      'ja': '日本語 (Japanese)',
+      'ko': '한국어 (Korean)',
+      'fr': 'Français',
+      'de': 'Deutsch',
+      'zh': '中文 (Chinese)',
+      'pt': 'Português',
+      'ru': 'Русский',
+      'ar': 'العربية',
+      'el': 'Ελληνικά (Greek)'
+    };
+
+    const base = this.getBaseLanguage(track.language || track.originalLanguage);
+    let name = langNames[base] || track.label || track.language || 'Audio';
+
+    if (track.label && track.label !== name && !track.label.toLowerCase().includes(name.toLowerCase())) {
+      name = `${name} (${track.label})`;
+    } else if (track.language && track.language !== base) {
+      name = `${name} [${track.language}]`;
+    }
+
+    return name;
+  }
+
+  /**
+   * Mengembalikan daftar track audio unik untuk ditampilkan pada UI (mencegah duplikasi codec/variant)
+   * @return {!Array<shaka.extern.AudioTrack>}
+   */
+  getDistinctAudioTracks() {
+    if (!this.player) return [];
+    const tracks = this.player.getAudioTracks() || [];
+    if (!tracks.length) return [];
+
+    const activeTrack = tracks.find((t) => t.active);
+    const distinct = new Map();
+
+    for (const track of tracks) {
+      const baseLang = this.getBaseLanguage(track.language || track.originalLanguage);
+      const specialRoles = (track.roles || []).filter(r => r !== 'main' && r !== 'alternate');
+      const roleStr = specialRoles.join(',');
+      const channels = track.channelsCount || 2;
+      const userKey = `${baseLang}_${roleStr}_${channels > 2 ? channels : 'stereo'}`;
+
+      if (!distinct.has(userKey)) {
+        distinct.set(userKey, track);
+      } else {
+        if (track.active) {
+          distinct.set(userKey, track);
+        } else {
+          const existing = distinct.get(userKey);
+          if (!existing.active && activeTrack && track.mimeType === activeTrack.mimeType) {
+            distinct.set(userKey, track);
+          }
+        }
+      }
+    }
+
+    return Array.from(distinct.values());
+  }
+
+  /**
+   * Mengganti track audio secara live ketika pengguna memilih dari menu tanpa refresh halaman
+   * @param {shaka.extern.AudioTrack} track
+   */
+  async selectAudioManually(track) {
+    if (!this.player || this.isSwitchingAudio) return;
+    if (!track) return;
+
+    this.isSwitchingAudio = true;
+    try {
+      const currentTracks = this.player.getAudioTracks() || [];
+      // Cari track terbaik yang cocok dari daftar track saat ini
+      let targetTrack = currentTracks.find((t) => {
+        if (track.id != null && t.id != null) return t.id === track.id;
+        return this.getBaseLanguage(t.language) === this.getBaseLanguage(track.language) &&
+               t.channelsCount === track.channelsCount &&
+               t.mimeType === track.mimeType;
+      });
+
+      if (!targetTrack) {
+        targetTrack = this.findMatchingAudioTrack(currentTracks, track.language || track.originalLanguage);
+      }
+
+      if (!targetTrack) {
+        this.showToast('Track audio tidak tersedia');
+        this.refreshAudioList();
+        return;
+      }
+
+      // 1. Tandai pilihan manual pengguna agar tidak ditimpa oleh auto-selector
+      this.isManualAudioSelected = true;
+      this.manualAudioLanguage = targetTrack.language || targetTrack.originalLanguage;
+
+      // 2. Terapkan pemilihan audio via Shaka Player API seketika (safeMargin: 0)
+      this.player.selectAudioTrack(targetTrack, /* safeMargin= */ 0);
+
+      // 3. Kunci konfigurasi preferredAudio player agar ABR engine internal Shaka tetap mengunci pilihan ini
+      this.player.configure({
+        preferredAudio: [{
+          language: targetTrack.language,
+          role: (targetTrack.roles && targetTrack.roles[0]) || '',
+          label: targetTrack.label || '',
+          channelCount: targetTrack.channelsCount || 0,
+          codec: '',
+          spatialAudio: targetTrack.spatialAudio || false
+        }]
+      });
+
+      const label = this.getAudioTrackDisplayLabel(targetTrack);
+      this.showToast(`Audio: ${label}`);
+
+      // 4. Segera perbarui indikator track aktif pada UI
+      this.refreshAudioList();
+      this.closeSettings();
+    } catch (err) {
+      console.error('Gagal menerapkan pilihan audio secara live:', err);
+      this.showToast('Gagal mengganti bahasa audio');
+      this.refreshAudioList();
+    } finally {
+      this.isSwitchingAudio = false;
+    }
+  }
+
+  /**
+   * Memperbarui daftar pilihan audio di menu settings titik-3
+   */
+  refreshAudioList() {
+    if (!this.player || !this.audioList) return;
+    const distinctTracks = this.getDistinctAudioTracks();
+    this.audioList.innerHTML = '';
+
+    if (!distinctTracks || !distinctTracks.length) {
+      const emptyLi = document.createElement('li');
+      emptyLi.className = 'settings-item';
+      emptyLi.style.cursor = 'default';
+      emptyLi.style.opacity = '0.6';
+      emptyLi.innerHTML = `<span>Tidak ada pilihan audio</span>`;
+      this.audioList.appendChild(emptyLi);
+      return;
+    }
+
+    const allTracks = this.player.getAudioTracks() || [];
+    const activeTrack = allTracks.find((t) => t.active);
+
+    distinctTracks.forEach((track) => {
+      const isActive = activeTrack && (
+        (track.id != null && activeTrack.id != null && track.id === activeTrack.id) ||
+        (this.getBaseLanguage(track.language) === this.getBaseLanguage(activeTrack.language) &&
+         track.channelsCount === activeTrack.channelsCount)
+      );
+
+      const li = document.createElement('li');
+      li.className = `settings-item ${isActive ? 'active' : ''}`;
+
+      const label = this.getAudioTrackDisplayLabel(track);
+      let badge = '';
+      if (isActive) {
+        badge = '<span class="badge" style="background:#e50914;color:#fff;">Aktif</span>';
+      } else if (track.channelsCount && track.channelsCount > 2) {
+        badge = `<span class="badge">${track.channelsCount}.1</span>`;
+      }
+
+      li.innerHTML = `<span>${label}</span>${badge}`;
+
+      li.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.selectAudioManually(track);
+      });
+
+      this.audioList.appendChild(li);
+    });
   }
 
   refreshQualityList() {
@@ -290,7 +696,7 @@ class ShakaCustomPlayer {
     const config = this.player.getConfiguration();
     const isAuto = config.abr.enabled;
 
-    // Filter tracks with unique height resolutions
+    // Filter tracks dengan tinggi resolusi unik
     const distinctResolutions = new Map();
     tracks.forEach((track) => {
       if (track.height && !distinctResolutions.has(track.height)) {
@@ -302,7 +708,7 @@ class ShakaCustomPlayer {
 
     this.qualityList.innerHTML = '';
 
-    // Auto option
+    // Opsi Otomatis (ABR)
     const autoLi = document.createElement('li');
     autoLi.className = `settings-item ${isAuto ? 'active' : ''}`;
     autoLi.innerHTML = `<span>Otomatis (ABR)</span><span class="badge">Auto</span>`;
@@ -314,7 +720,7 @@ class ShakaCustomPlayer {
     });
     this.qualityList.appendChild(autoLi);
 
-    // List specific resolutions (e.g. 1080p, 720p, 480p)
+    // Daftar resolusi spesifik (1080p, 720p, 480p, dll.)
     sortedTracks.forEach((track) => {
       const isCurrent = !isAuto && track.active;
       const li = document.createElement('li');
@@ -324,9 +730,38 @@ class ShakaCustomPlayer {
 
       li.addEventListener('click', () => {
         this.player.configure({ abr: { enabled: false } });
-        this.player.selectVariantTrack(track, /* clearBuffer= */ false);
+
+        // PENTING: Pilih variant pada resolusi ini yang mempertahankan audio aktif saat ini!
+        const allVariants = this.player.getVariantTracks();
+        const activeVariant = allVariants.find((v) => v.active);
+        const candidates = allVariants.filter((v) => v.height === track.height);
+
+        let chosenVariant = null;
+        if (activeVariant) {
+          // 1. Cocokkan audioId yang sama
+          if (activeVariant.audioId != null) {
+            chosenVariant = candidates.find((v) => v.audioId === activeVariant.audioId);
+          }
+          // 2. Cocokkan bahasa audio yang sama jika audioId tidak match
+          if (!chosenVariant && activeVariant.language) {
+            const activeLang = this.getBaseLanguage(activeVariant.language);
+            chosenVariant = candidates.find((v) => this.getBaseLanguage(v.language) === activeLang);
+          }
+        }
+
+        // 3. Jika pengguna pernah memilih audio manual, sesuaikan dengan bahasa manual tersebut
+        if (!chosenVariant && this.isManualAudioSelected && this.manualAudioLanguage) {
+          const manualLang = this.getBaseLanguage(this.manualAudioLanguage);
+          chosenVariant = candidates.find((v) => this.getBaseLanguage(v.language) === manualLang);
+        }
+
+        // Fallback ke candidate pertama jika tidak ada yang spesifik
+        const finalVariant = chosenVariant || candidates[0] || track;
+
+        this.player.selectVariantTrack(finalVariant, /* clearBuffer= */ false);
         this.showToast(`Resolusi diubah ke: ${track.height}p`);
         this.refreshQualityList();
+        this.refreshAudioList();
         this.closeSettings();
       });
 
@@ -339,7 +774,11 @@ class ShakaCustomPlayer {
     try {
       await this.player.load(manifestUri);
       this.spinner.style.display = 'none';
+      this.applyAudioSelection();
       this.refreshQualityList();
+      this.refreshAudioList();
+      await this.initSubtitles();
+      this.refreshSubtitleList();
     } catch (err) {
       this.spinner.style.display = 'none';
       this.onError(err);
@@ -538,78 +977,228 @@ class ShakaCustomPlayer {
   }
 
   /**
-   * TMDB API Connector
-   * Mudah dihubungkan dengan API TMDB untuk mengambil Judul dan Episode otomatis
-   * @param {Object} params
-   * @param {string} params.apiKey - TMDB v3 API Key
-   * @param {number|string} params.id - TMDB Show ID
-   * @param {number|string} params.season - Season number
-   * @param {number|string} params.episode - Episode number
+   * Inisialisasi subtitle saat stream selesai dimuat
    */
-  async connectTMDB({ apiKey, id, season, episode, type }) {
-    const key = apiKey || this.defaultTmdbApiKey;
-    if (!key || !id) {
-      console.warn('TMDB: apiKey and id are required');
+  async initSubtitles() {
+    try {
+      if (this.subUri) {
+        await this.loadSubtitleFromUrl(this.subUri, 'Subtitle Eksternal', 'id');
+        return;
+      }
+
+      // Coba muat subtitle default Alchemy of Souls (SRT atau VTT, relatif maupun absolut)
+      const defaultCandidates = [
+        'alchemy_of_souls_s01e01_id.srt',
+        '/alchemy_of_souls_s01e01_id.srt',
+        'alchemy_of_souls_s01e01_id.vtt',
+        '/alchemy_of_souls_s01e01_id.vtt'
+      ];
+
+      for (const candidate of defaultCandidates) {
+        try {
+          const testRes = await fetch(candidate, { method: 'HEAD' });
+          if (testRes.ok) {
+            const track = await this.loadSubtitleFromUrl(
+              candidate,
+              'Indonesia (Alchemy of Souls S01E01)',
+              'id'
+            );
+            if (track) return;
+          }
+        } catch (e) {
+          // ignore & try next candidate
+        }
+      }
+
+      // Fallback langsung muat relative srt jika fetch HEAD tidak didukung
+      await this.loadSubtitleFromUrl(
+        'alchemy_of_souls_s01e01_id.srt',
+        'Indonesia (Alchemy of Souls S01E01)',
+        'id'
+      );
+    } catch (err) {
+      console.warn('Gagal menginisialisasi subtitle default:', err);
+    }
+  }
+
+  /**
+   * Muat subtitle dari URL / Path lokal
+   * @param {string} url
+   * @param {string} label
+   * @param {string} language
+   */
+  async loadSubtitleFromUrl(url, label = 'Indonesia', language = 'id') {
+    if (!this.player) return null;
+    try {
+      const isSrt = url.toLowerCase().includes('.srt');
+      const mimeType = isSrt ? 'text/srt' : 'text/vtt';
+
+      const track = await this.player.addTextTrackAsync(
+        url,
+        language,
+        'subtitles',
+        mimeType,
+        undefined,
+        label
+      );
+
+      this.player.selectTextTrack(track);
+      this.currentTextTrack = track;
+      this.isSubtitleActive = true;
+      this.refreshSubtitleList();
+      this.showToast(`💬 Subtitle: ${label}`);
+      return track;
+    } catch (err) {
+      console.error('Error saat memuat subtitle:', err);
+      this.showToast('Gagal memuat file subtitle');
+      return null;
+    }
+  }
+
+  /**
+   * Muat subtitle dari File lokal (File picker atau Drag & Drop)
+   * @param {File} file
+   */
+  async loadSubtitleFromFile(file) {
+    if (!file) return null;
+    try {
+      const blobUrl = URL.createObjectURL(file);
+      const cleanName = file.name.replace(/\.(srt|vtt)$/i, '');
+      const label = `Kustom: ${cleanName}`;
+      return await this.loadSubtitleFromUrl(blobUrl, label, 'id');
+    } catch (err) {
+      console.error('Error membaca file subtitle lokal:', err);
+      this.showToast('Gagal membaca file subtitle lokal');
+      return null;
+    }
+  }
+
+  /**
+   * Muat video dari file lokal pengguna (.mp4 / .webm / .mkv)
+   * @param {File} file
+   */
+  async loadVideoFromFile(file) {
+    if (!file || !this.player) return;
+    try {
+      this.spinner.style.display = 'block';
+      const cleanName = file.name.replace(/\.[^/.]+$/, "");
+      this.setMetadata({
+        title: cleanName
+      });
+
+      const blobUrl = URL.createObjectURL(file);
+      await this.player.load(blobUrl);
+      this.spinner.style.display = 'none';
+
+      this.applyAudioSelection();
+      this.refreshQualityList();
+      this.refreshAudioList();
+      await this.initSubtitles();
+      this.refreshSubtitleList();
+      this.showToast(`🎬 Video dimuat: ${file.name}`);
+      this.video.play().catch(() => {});
+    } catch (err) {
+      this.spinner.style.display = 'none';
+      console.error('Error saat memuat file video lokal:', err);
+      this.showToast('Gagal memuat file video lokal');
+    }
+  }
+
+  /**
+   * Toggle Subtitle ON / OFF (Shortcut 'C')
+   */
+  toggleSubtitle() {
+    if (!this.player) return;
+    const tracks = this.player.getTextTracks() || [];
+    if (!tracks.length) {
+      this.showToast('💬 Tidak ada subtitle tersedia');
       return;
     }
 
-    try {
-      this.showToast('Menghubungkan ke TMDB...');
-
-      if (type === 'movie' || (season === undefined && episode === undefined)) {
-        // Mode Movie
-        const movieRes = await fetch(`https://api.themoviedb.org/3/movie/${id}?api_key=${key}&language=id-ID`);
-        const movieData = await movieRes.json();
-        const movieTitle = movieData.title || movieData.original_title || 'Movie';
-        
-        this.setMetadata({
-          title: movieTitle,
-        });
-
-        if (movieData.backdrop_path) {
-          this.video.poster = `https://image.tmdb.org/t/p/original${movieData.backdrop_path}`;
-        }
-        this.showToast(`TMDB: ${movieTitle}`);
-      } else {
-        // Mode Series / TV
-        const seriesRes = await fetch(`https://api.themoviedb.org/3/tv/${id}?api_key=${key}&language=id-ID`);
-        const seriesData = await seriesRes.json();
-        const seriesName = seriesData.name || seriesData.original_name || 'Series';
-
-        if (season !== undefined && episode !== undefined) {
-          const epRes = await fetch(`https://api.themoviedb.org/3/tv/${id}/season/${season}/episode/${episode}?api_key=${key}&language=id-ID`);
-          const epData = await epRes.json();
-          
-          const epName = epData.name && !epData.name.startsWith('Episode') ? ` - ${epData.name}` : '';
-          const fullTitle = `${seriesName}${epName}`;
-
-          this.setMetadata({
-            title: fullTitle,
-            season: season,
-            episode: episode
-          });
-
-          if (epData.still_path) {
-            this.video.poster = `https://image.tmdb.org/t/p/original${epData.still_path}`;
-          } else if (seriesData.backdrop_path) {
-            this.video.poster = `https://image.tmdb.org/t/p/original${seriesData.backdrop_path}`;
-          }
-
-          this.showToast(`TMDB: ${seriesName} (S${season} E${episode})`);
-        } else {
-          this.setMetadata({
-            title: seriesName,
-          });
-          if (seriesData.backdrop_path) {
-            this.video.poster = `https://image.tmdb.org/t/p/original${seriesData.backdrop_path}`;
-          }
-          this.showToast(`TMDB: ${seriesName}`);
-        }
-      }
-    } catch (err) {
-      console.error('TMDB Error:', err);
-      this.showToast('Gagal mengambil data dari TMDB');
+    if (this.isSubtitleActive) {
+      this.player.selectTextTrack(null);
+      this.isSubtitleActive = false;
+      this.showToast('💬 Subtitle dinonaktifkan');
+    } else {
+      const trackToSelect = this.currentTextTrack || tracks[0];
+      this.player.selectTextTrack(trackToSelect);
+      this.currentTextTrack = trackToSelect;
+      this.isSubtitleActive = true;
+      this.showToast(`💬 Subtitle: ${trackToSelect.label || trackToSelect.language || 'Aktif'}`);
     }
+    this.refreshSubtitleList();
+  }
+
+  /**
+   * Render ulang daftar subtitle pada menu 3-titik
+   */
+  refreshSubtitleList() {
+    if (!this.player || !this.subtitleList) return;
+    const tracks = this.player.getTextTracks() || [];
+    this.subtitleList.innerHTML = '';
+
+    const activeTrack = tracks.find((t) => t.active);
+    this.isSubtitleActive = !!activeTrack;
+    if (activeTrack) {
+      this.currentTextTrack = activeTrack;
+    }
+
+    // 1. Opsi "Nonaktif"
+    const offLi = document.createElement('li');
+    offLi.className = `settings-item ${!this.isSubtitleActive ? 'active' : ''}`;
+    offLi.innerHTML = `<span>Nonaktif</span>${!this.isSubtitleActive ? '<span class="badge" style="background:#e50914;color:#fff;">Aktif</span>' : ''}`;
+    offLi.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.player.selectTextTrack(null);
+      this.isSubtitleActive = false;
+      this.refreshSubtitleList();
+      this.showToast('💬 Subtitle dinonaktifkan');
+      this.closeSettings();
+    });
+    this.subtitleList.appendChild(offLi);
+
+    // 2. Daftar text tracks yang tersedia
+    tracks.forEach((track) => {
+      const isActive = track.active;
+      const li = document.createElement('li');
+      li.className = `settings-item ${isActive ? 'active' : ''}`;
+
+      let labelText = track.label || track.language;
+      if (track.language && track.label && track.label !== track.language) {
+        labelText = `${track.label} (${track.language})`;
+      }
+      if (!labelText) labelText = 'Subtitle';
+
+      const badge = isActive ? '<span class="badge" style="background:#e50914;color:#fff;">Aktif</span>' : '';
+      li.innerHTML = `<span>${labelText}</span>${badge}`;
+
+      li.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.player.selectTextTrack(track);
+        this.currentTextTrack = track;
+        this.isSubtitleActive = true;
+        this.refreshSubtitleList();
+        this.showToast(`💬 Subtitle: ${track.label || track.language}`);
+        this.closeSettings();
+      });
+
+      this.subtitleList.appendChild(li);
+    });
+
+    // 3. Tombol "+ Muat File Subtitle (.srt / .vtt)"
+    const uploadLi = document.createElement('li');
+    uploadLi.className = 'settings-item';
+    uploadLi.style.borderTop = '1px dashed rgba(255,255,255,0.15)';
+    uploadLi.style.marginTop = '4px';
+    uploadLi.style.color = '#38bdf8';
+    uploadLi.innerHTML = `<span>+ Muat File Subtitle (.srt / .vtt)</span><span class="badge" style="background:rgba(56,189,248,0.2);color:#38bdf8;">File</span>`;
+    uploadLi.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (this.subFileInput) {
+        this.subFileInput.click();
+      }
+    });
+    this.subtitleList.appendChild(uploadLi);
   }
 
   parseQueryParams() {
@@ -618,11 +1207,10 @@ class ShakaCustomPlayer {
     const title = params.get('title');
     const season = params.get('season');
     const episode = params.get('episode');
-    const tmdbKey = params.get('tmdb_key');
-    const tmdbId = params.get('tmdb_id');
-    const tmdbMovie = params.get('tmdb_movie');
+    const sub = params.get('sub');
 
     if (src) this.streamUri = src;
+    if (sub) this.subUri = sub;
 
     if (title) {
       this.setMetadata({
@@ -630,20 +1218,11 @@ class ShakaCustomPlayer {
         season: season || undefined,
         episode: episode || undefined
       });
-    }
-
-    if (tmdbMovie) {
-      this.connectTMDB({
-        apiKey: tmdbKey,
-        id: tmdbMovie,
-        type: 'movie'
-      });
-    } else if (tmdbId) {
-      this.connectTMDB({
-        apiKey: tmdbKey,
-        id: tmdbId,
-        season: season ? parseInt(season, 10) : 1,
-        episode: episode ? parseInt(episode, 10) : 1
+    } else {
+      this.setMetadata({
+        title: 'Alchemy of Souls',
+        season: 1,
+        episode: 1
       });
     }
   }

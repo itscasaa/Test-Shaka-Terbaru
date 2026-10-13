@@ -496,3 +496,34 @@ body, html {
     display: none;
   }
 }
+
+/* Custom Subtitle Styling (Netflix-style clean text) */
+video::cue {
+  background-color: rgba(0, 0, 0, 0.75);
+  color: #ffffff;
+  font-family: 'Poppins', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 1.35rem;
+  font-weight: 500;
+  line-height: 1.4;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9);
+  padding: 4px 10px;
+  border-radius: 4px;
+}
+
+/* Drag & Drop Subtitle Target Styling */
+.video-player-container.dragover {
+  outline: 3px dashed #ff2a2a;
+  outline-offset: -8px;
+}
+
+/* Sleek Settings Scrollbar */
+.settings-menu::-webkit-scrollbar,
+.settings-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.settings-menu::-webkit-scrollbar-thumb,
+.settings-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}

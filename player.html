@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Shaka Custom Player</title>
+  <title>Alchemy of Souls - Shaka Custom Player</title>
   <link rel="stylesheet" href="player.css">
   <!-- Load Shaka Player Core Compiled -->
   <script src="dist/shaka-player.compiled.js"></script>
@@ -14,7 +14,7 @@
   <div class="video-player-container" id="playerContainer">
     
     <!-- HTML5 Video Element -->
-    <video id="videoElement" playsinline poster="reference_ui.jpg"></video>
+    <video id="videoElement" playsinline poster="alchemy_poster.jpg"></video>
 
     <!-- Buffering Spinner -->
     <div class="center-indicator">
@@ -54,6 +54,20 @@
           </ul>
 
           <div style="padding: 10px 18px 4px 18px; font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; border-top: 1px solid rgba(255,255,255,0.08);">
+            Audio / Dubbing
+          </div>
+          <ul class="settings-list" id="audioList">
+            <!-- Dynamically populated from Shaka audio tracks -->
+          </ul>
+
+          <div style="padding: 10px 18px 4px 18px; font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; border-top: 1px solid rgba(255,255,255,0.08);">
+            Subtitle / Teks (C)
+          </div>
+          <ul class="settings-list" id="subtitleList">
+            <!-- Dynamically populated from Shaka text tracks -->
+          </ul>
+
+          <div style="padding: 10px 18px 4px 18px; font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; border-top: 1px solid rgba(255,255,255,0.08);">
             Kecepatan Putar
           </div>
           <ul class="settings-list" id="speedList">
@@ -61,32 +75,29 @@
           </ul>
 
           <div style="padding: 10px 18px 4px 18px; font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; border-top: 1px solid rgba(255,255,255,0.08);">
-            TMDB Connector
+            Media Lokal
           </div>
-          <div style="padding: 8px 18px 12px 18px; display: flex; flex-direction: column; gap: 8px;">
-            <div style="display: flex; gap: 6px;">
-              <input type="text" id="tmdbIdInput" placeholder="TMDB ID (cth: 135157)" style="flex: 1; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 6px 10px; border-radius: 6px; font-size: 12px; outline: none;">
-              <input type="number" id="tmdbSeasonInput" placeholder="S" title="Season" style="width: 44px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 6px; border-radius: 6px; font-size: 12px; text-align: center; outline: none;">
-              <input type="number" id="tmdbEpisodeInput" placeholder="E" title="Episode" style="width: 44px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 6px; border-radius: 6px; font-size: 12px; text-align: center; outline: none;">
-            </div>
-            <button id="tmdbApplyBtn" style="background: #e50914; color: #fff; border: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: background 0.2s;">Terapkan Metadata TMDB</button>
-            
-            <div style="font-size: 11px; color: #999; margin-top: 2px;">Preset Uji Coba:</div>
-            <div style="display: flex; gap: 6px;">
-              <button id="tmdbPresetAos" style="flex: 1; background: rgba(255,255,255,0.12); color: #ddd; border: none; padding: 6px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;">✨ Alchemy of Souls</button>
-              <button id="tmdbPresetMoving" style="flex: 1; background: rgba(255,255,255,0.12); color: #ddd; border: none; padding: 6px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;">✨ Moving</button>
-            </div>
-          </div>
+          <ul class="settings-list">
+            <li class="settings-item" id="btnPickLocalVideo" style="color: #4ade80;">
+              <span>+ Buka File Video (.mp4 / .mkv)</span>
+              <span class="badge" style="background: rgba(74,222,128,0.2); color: #4ade80;">Video</span>
+            </li>
+          </ul>
         </div>
       </div>
+
+      <!-- Hidden file input for loading external subtitles (.srt / .vtt) -->
+      <input type="file" id="subFileInput" accept=".srt,.vtt" style="display: none;">
+      <!-- Hidden file input for loading local video files -->
+      <input type="file" id="videoFileInput" accept="video/*,.mp4,.mkv,.webm" style="display: none;">
 
       <!-- Bottom Controls Section -->
       <div class="player-bottom-section">
         
-        <!-- Episode & Title Overlay (From Screenshot) -->
+        <!-- Episode & Title Overlay -->
         <div class="player-meta-info">
-          <div class="player-episode" id="playerEpisode">Eps 1 Season 3</div>
-          <div class="player-title" id="playerTitle">Go Younjung</div>
+          <div class="player-episode" id="playerEpisode">Eps 1 Season 1</div>
+          <div class="player-title" id="playerTitle">Alchemy of Souls</div>
         </div>
 
         <!-- Controls Row -->
