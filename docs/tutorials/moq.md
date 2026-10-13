@@ -1,0 +1,543 @@
+# Media over QUIC (MoQ)
+
+This tutorial explains how to use Shaka Player to stream live content over
+**MoQT** (Media over QUIC Transport), using the **MSF** (MoQ Streaming Format)
+manifest parser built into the player.
+
+**Important**
+
+Support for MoQ in Shaka Player is currently **experimental** and is only
+available in the experimental builds. It will remain experimental until the
+underlying specifications are finalized and no longer in draft status.
+
+**Relevant specs:**
+- [draft-ietf-moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
+- [draft-ietf-moq-msf](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/)
+- [draft-ietf-moq-cmsf](https://datatracker.ietf.org/doc/draft-ietf-moq-cmsf/)
+- [draft-ietf-moq-loc](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/)
+- [draft-einarsson-moq-locmaf](https://datatracker.ietf.org/doc/draft-einarsson-moq-locmaf/)
+- [draft-gregoire-moq-msfts](https://datatracker.ietf.org/doc/draft-gregoire-moq-msfts/)
+- [draft-wilaw-moq-scte35-event-timeline](https://datatracker.ietf.org/doc/draft-wilaw-moq-scte35-event-timeline/)
+
+
+## Prerequisites
+
+MoQ streaming relies on the **WebTransport** browser API, which has the
+following requirements:
+
+- The page must be served over **HTTPS** or from `localhost`.
+- The browser must support the WebTransport API.
+- The MoQT relay/server must also be reachable over HTTPS (or from localhost
+  for testing with self-signed certificates; see `fingerprintUri` below).
+
+
+## Basic Usage
+
+Loading a MoQ stream is straightforward, but there is one **mandatory
+requirement**: you must always pass `'application/msf'` as the `mimeType`
+argument to `player.load()`. This is what tells Shaka to use the MSF manifest
+parser instead of DASH or HLS parsers.
+
+```js
+const manifestUri = 'https://relay.example.com/moq-endpoint';
+
+async function initPlayer() {
+  shaka.polyfill.installAll();
+
+  if (!shaka.Player.isBrowserSupported()) {
+    console.error('Browser not supported!');
+    return;
+  }
+
+  const video = document.getElementById('video');
+  const player = new shaka.Player();
+  await player.attach(video);
+
+  player.addEventListener('error', (event) => {
+    console.error('Error code', event.detail.code, event.detail);
+  });
+
+  try {
+    // The mimeType 'application/msf' is REQUIRED for MOQ streams.
+    await player.load(manifestUri, /* startTime= */ null, 'application/msf');
+    console.log('MOQ stream loaded!');
+  } catch (e) {
+    console.error('Load failed', e);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', initPlayer);
+```
+
+> **Important:** Never omit the `'application/msf'` MIME type. Without it,
+> Shaka cannot identify the stream as a MoQ source and will fail or attempt
+> to parse it as a different format.
+
+
+## What Happens Under the Hood
+
+When `player.load()` is called with `'application/msf'`, Shaka:
+
+1. Opens a **WebTransport** connection to the given URI.
+2. Performs **MoQT session setup** (client/server handshake, version
+   negotiation).
+3. Either subscribes to the **catalog** track in a known namespace (if
+   `manifest.msf.namespaces` is configured), or waits for a
+   `PUBLISH_NAMESPACE` announcement from the server to discover the namespace
+   dynamically. As MSF requires, the subscription also retrieves the current
+   Group of the catalog track from its first Object (a Joining FETCH in
+   draft-18, `FILL_PARAMETERS` in draft-20 and later), so the latest complete
+   catalog is received even when the server does not publish it again.
+4. Parses the catalog (a JSON document) to discover all available audio,
+   video, and text tracks. The catalog is rebuilt from its independent
+   version and any delta updates that follow it, and the version it declares
+   is checked.
+5. Subscribes to each track's MoQT data stream, feeding segments into Shaka's
+   regular media pipeline.
+6. Subscribes to the catalog's **media timeline** and **event timeline**
+   tracks, if any: the first gives the presentation a DVR window and lets the
+   viewer seek behind the live edge, the second carries metadata such as
+   SCTE-35 messages.
+
+> **Note:** Only **live** content is supported. VOD content (where `isLive`
+> is false in the catalog) is not supported and will throw an error.
+
+> **Note:** Catalog updates are not applied yet. The catalog subscription
+> stays open and every update is tracked, but the tracks Shaka plays are the
+> ones in the first complete catalog it receives; later changes are only
+> logged.
+
+By default a presentation has no DVR window: the seek range is a few seconds
+around the live edge, because nothing in the catalog says where to subscribe
+from to get anything older. A publisher that supplies a **media timeline**
+lifts that restriction; see [Media timeline, DVR and seeking](#media-timeline-dvr-and-seeking).
+
+
+## Supported Packagings
+
+Each catalog track declares how its media is packaged into MoQT objects, in its
+`packaging` field. A track whose packaging Shaka does not support is skipped,
+and the rest of the catalog still plays.
+
+| `packaging` | Object contains | Spec |
+| --- | --- | --- |
+| `cmaf` | One CMAF chunk | [draft-ietf-moq-cmsf](https://datatracker.ietf.org/doc/draft-ietf-moq-cmsf/) |
+| `chunk-per-object` | One CMAF chunk | [draft-ietf-moq-cmsf](https://datatracker.ietf.org/doc/draft-ietf-moq-cmsf/) |
+| `loc` | One frame of a raw bitstream | [draft-ietf-moq-loc](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) |
+| `locmaf` | One CMAF chunk with its `moof` compacted | [draft-einarsson-moq-locmaf](https://datatracker.ietf.org/doc/draft-einarsson-moq-locmaf/) |
+| `m2ts` | A run of whole transport packets | [draft-gregoire-moq-msfts](https://datatracker.ietf.org/doc/draft-gregoire-moq-msfts/) |
+
+Two more `packaging` values carry no media, but metadata about it:
+
+| `packaging` | Object contains | Spec | See |
+| --- | --- | --- | --- |
+| `mediatimeline` | A JSON map from media time to Location and wallclock time | [draft-ietf-moq-msf](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) section 7 | [Media timeline, DVR and seeking](#media-timeline-dvr-and-seeking) |
+| `eventtimeline` | JSON records of metadata placed on the timeline | [draft-ietf-moq-msf](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) section 8 | [Event timelines and SCTE-35](#event-timelines-and-scte-35) |
+
+A media track can also carry its media timeline inline, in a `template` field.
+Neither kind of track decides whether the presentation is live or how long it
+is.
+
+### LOCMAF (`locmaf`)
+
+A LOCMAF object is a CMAF chunk whose `moof` has been reduced to a few tagged
+fields, some of them sent only when they change from the previous chunk. Shaka
+rebuilds the `moof` before appending, so the media, the initialization segment
+and the DRM signaling are exactly those of a `cmaf` track.
+
+- **The track must declare `locmafVersion`.** Only `"0.3"` is supported; a
+  track with any other version is skipped, because an unknown version would
+  decode into plausible but wrong values.
+- **The track must have initialization data** (`initData` or `initRef`): the
+  chunk's fields fall back to the defaults it declares.
+
+A publisher may offer each rendition twice, as a `cmaf` track and a `locmaf`
+track sharing one `initRef`. Those are the same stream described twice, and
+Shaka keeps both, which doubles the variant list with identical pairs. Which
+one to keep is the application's choice, made with `catalogPreprocessor` (see
+[MSF Configuration](#msf-configuration)); for example, to prefer LOCMAF:
+
+```js
+player.configure('manifest.msf.catalogPreprocessor', (catalog) => {
+  const shadowed = new Set(catalog.tracks
+      .filter((t) => t.packaging == 'locmaf' && t.initRef)
+      .map((t) => t.initRef));
+  catalog.tracks = catalog.tracks.filter(
+      (t) => t.packaging != 'cmaf' || !shadowed.has(t.initRef));
+});
+```
+
+### MPEG-2 Transport Stream (`m2ts`)
+
+Both source packet sizes are supported: 188-octet transport packets and
+192-octet M2TS source packets, whose 4-octet arrival timestamp is discarded
+because it says nothing about presentation.
+
+Two things are worth knowing about this packaging:
+
+- **The track must declare `codec`.** The codec decides which source buffers
+  MediaSource opens, and that happens before the first group has arrived to be
+  inspected, so it cannot be discovered from the media. A track carrying a
+  muxed program lists both codecs, comma separated, exactly like the HLS
+  `CODECS` attribute:
+
+  ```json
+  {
+    "name": "program-1-ts",
+    "packaging": "m2ts",
+    "codec": "avc1.64001f,mp4a.40.2",
+    "m2tsPacketSize": 188,
+    "m2tsPcrPid": 257
+  }
+  ```
+
+  Shaka opens an audio and a video source buffer from that one track and feeds
+  both from its segments.
+
+- **Latency is one Group.** A transport packet carries no timing of its own, a
+  PES packet spans many of them, and an object boundary falls wherever the
+  publisher chose to cut, so a single object cannot be appended on its own. The
+  Group is the smallest unit that can be, and it is only complete once the next
+  one starts. Expect higher latency than `chunk-per-object`, where each object
+  can be appended the moment it arrives.
+
+Declaring `initData` (base64 PAT/PMT packets) is recommended: Shaka prepends it
+to every group, which is what keeps a stream playable when its program
+information does not repeat at the start of each group.
+
+If the publisher signals a PCR discontinuity between two groups, Shaka
+re-anchors the media so that presentation time keeps running forward, and
+tells the transmuxer to start a fresh initialization segment.
+
+> **Note:** `m2ts` needs the transmuxer, which is a separate build target.
+> A custom build must include `+@transmuxer` alongside `+@msf`. The same is
+> true of HLS with transport stream segments.
+
+
+## Media timeline, DVR and seeking
+
+MoQT addresses content by Group and Object, while media is addressed by
+presentation time, and nothing in the transport relates the two. A player that
+does not know the relation can only ever ask for the live edge: a time the
+viewer seeks to names no Location to subscribe from. The **media timeline**
+([draft-ietf-moq-msf](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/)
+section 7) is what supplies it, and with it the seek range stops being
+"whatever has already arrived".
+
+MSF carries the relation two ways, and Shaka reads both. Where they describe
+the same time, the explicit records win, because they are observations of what
+was published while a template is a prediction.
+
+### An explicit media timeline track
+
+A track with `"packaging": "mediatimeline"` publishes JSON documents listing
+one record per published Group: the media presentation timestamp in
+milliseconds, the Location as `[Group ID, Object ID]`, and the wallclock time
+of encoding in milliseconds since the epoch (`0` when it is not known). Its
+`depends` field names the tracks the records address, and is required.
+
+```json
+{
+  "name": "history",
+  "packaging": "mediatimeline",
+  "mimeType": "application/json",
+  "depends": ["video0", "audio0"]
+}
+```
+
+```json
+[
+  [0, [0, 0], 1759924158381],
+  [2002, [1, 0], 1759924160383],
+  [4004, [2, 0], 1759924162385]
+]
+```
+
+The first Object of each Group carries everything the publisher still offers,
+so a record missing from it has aged out and leaves the seek range; the Objects
+after it in that Group carry only what is new.
+
+### A template
+
+Where Groups have a constant duration, a media track can carry the relation
+inline instead, as `[startMediaTime, deltaMediaTime, startLocation,
+deltaLocation, startWallclock, deltaWallclock]`:
+
+```json
+{
+  "name": "video0",
+  "packaging": "loc",
+  "codec": "av01.0.08M.10.0.110.09",
+  "template": [0, 2002, [0, 0], [1, 0], 1759924158381, 2002]
+}
+```
+
+Each entry is then `start + n * delta`, so the template describes any point of
+the presentation without listing it. A track with a template should not also
+have a timeline track, and the template must not change once publishing has
+started.
+
+### What Shaka does with it
+
+- **The seek range** reaches back to the oldest point the timeline describes,
+  instead of sitting at the live edge. It is only offered when *every*
+  subscribed track has a timeline: a range that only half the media can be
+  served for is a stall, not a seek. `manifest.availabilityWindowOverride`
+  still overrides it.
+- **Seeking behind the live edge** withdraws each track's subscription and
+  asks for it again from the Location the timeline gives for the target, which
+  is what a seek costs on a transport where a subscription is a position in a
+  track rather than a URL to fetch. Seeking within what has already arrived
+  costs nothing, and seeking back to the live edge returns the subscriptions to
+  following it.
+
+Every supported draft can subscribe from a past Location, though each carries
+the request differently: draft-18 in the `SUBSCRIPTION_FILTER` parameter,
+draft-20 and later in `LOCATION_FILTER`.
+
+> **Note:** A media timeline describes what the publisher offered when the
+> timeline was written, and a publisher may still refuse to start where it
+> says, typically because the Group is older than anything it still holds.
+> When that happens the track returns to the live edge rather than waiting for
+> media that is not coming.
+
+Timeline documents compressed with `MSF_COMPRESSION` (GZIP) are decompressed
+on draft-18 and later. A compression that is not supported makes Shaka
+unsubscribe from the timeline track, and playback carries on without a DVR
+window.
+
+
+## Event timelines and SCTE-35
+
+A track with `"packaging": "eventtimeline"` associates metadata with the
+presentation (draft-ietf-moq-msf section 8). Each record carries its data and
+one index reference saying where it applies: a media time (`M`), a wallclock
+time (`T`) or a Location (`L`). A wallclock time or a Location is placed
+through the media timeline of the tracks the event timeline `depends` on.
+
+What the data means is defined by the track's `eventType`. Shaka consumes
+SCTE-35 (`urn:scte:scte35:2022:bin` and `urn:scte:scte35:2022:xml`, as defined
+by [draft-wilaw-moq-scte35-event-timeline](https://datatracker.ietf.org/doc/draft-wilaw-moq-scte35-event-timeline/00/)),
+and reports it through the same events as SCTE-35 in DASH and HLS; see
+{@tutorial scte35}. Event timelines of other types are ignored.
+
+
+## MSF Configuration
+
+All MoQ-specific options live under `manifest.msf` in the player configuration.
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      // Options described below
+    }
+  }
+});
+```
+
+### `fingerprintUri` (string, default: `''`)
+
+URL of a plain-text file containing the **SHA-256 hex fingerprint** of the
+server's self-signed TLS certificate. This is needed when connecting to a
+local relay or a server with a self-signed cert that the browser would
+otherwise reject.
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      fingerprintUri: 'https://relay.example.com/cert.hex',
+    }
+  }
+});
+```
+
+When set, Shaka fetches the fingerprint before opening the WebTransport
+connection and uses it to pin the certificate. Leave empty for servers with
+a CA-signed certificate.
+
+### `namespaces` (Array\<string\>, default: `[]`)
+
+The MoQT **namespace** to subscribe to for the catalog track. A namespace is
+an array of string path components that together identify the session on the
+relay.
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      // Subscribe to the catalog in namespace ['live', 'channel1']
+      namespaces: ['live', 'channel1'],
+    }
+  }
+});
+```
+
+When `namespaces` is set, Shaka immediately subscribes to the
+catalog in that namespace. When left empty (`[]`), Shaka instead listens for
+a `PUBLISH_NAMESPACE` announcement from the server and uses the advertised
+namespace automatically. Use the explicit form when you know the namespace
+ahead of time to reduce start-up latency.
+
+### `authorizationToken` (string, default: `''`)
+
+An optional **authorization token** sent to the server during the MoQT
+client setup handshake. The token is encoded with alias type `USE_VALUE`
+(`0x03`) per the spec.
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      authorizationToken: 'Bearer my-secret-token',
+    }
+  }
+});
+```
+
+### `version` (MsfVersion, default: `AUTO`)
+
+Controls which MoQT draft version(s) to negotiate with the server.
+
+| Value | WebTransport protocol strings offered | Description |
+|---|---|---|
+| `shaka.config.MsfVersion.AUTO` | `moqt-22`, `moqt-21`, `moqt-20`, `moqt-18` | Offer every supported draft, newest first (default). |
+| `shaka.config.MsfVersion.DRAFT_22` | `moqt-22` | Force draft-22 only. |
+| `shaka.config.MsfVersion.DRAFT_21` | `moqt-21` | Force draft-21 only. |
+| `shaka.config.MsfVersion.DRAFT_20` | `moqt-20` | Force draft-20 only. |
+| `shaka.config.MsfVersion.DRAFT_18` | `moqt-18` | Force draft-18 only. |
+
+Draft-18, draft-20, draft-21 and draft-22 are one family. Draft-20 changed a
+single thing Shaka can observe -- FETCH lost its Fetch Type field and its Start
+and End Locations, which moved into the `LOCATION_FILTER` parameter -- and
+draft-21 changed nothing at all on the wire, only how the specification is
+organised. Draft-22 changed `LOCATION_FILTER` again: its value now leads with an
+explicit Location Filter Type instead of a length. So all four share one
+implementation, and the newer ones differ only in how that parameter is written
+and in the subprotocol string relays select.
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      version: shaka.config.MsfVersion.DRAFT_22,
+    }
+  }
+});
+```
+
+The version is negotiated via the WebTransport subprotocol. Note that Shaka does
+not require the server to echo the subprotocol back: some relays accept the
+offered subprotocol while leaving `WebTransport.protocol` empty, and treating
+that as a failure would break otherwise working connections.
+
+When the server does not echo and more than one draft was offered, the choice is
+ambiguous, so Shaka reconnects offering one draft at a time, newest first, until
+one is accepted. That costs up to one WebTransport handshake per supported draft
+on such relays. If you know which draft your relay speaks, setting `version`
+explicitly avoids it.
+
+### `catalogPreprocessor` (function, default: no-op)
+
+An optional callback invoked after the catalog JSON is parsed, before Shaka
+processes its tracks. Use this to modify or filter catalog entries
+programmatically.
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      catalogPreprocessor: (catalog) => {
+        // Example: remove loc tracks from the catalog
+        catalog.tracks = catalog.tracks.filter(
+            (t) => t.packaging !== 'loc');
+      },
+    }
+  }
+});
+```
+
+The function receives the `msfCatalog.Catalog` object and modifies it in
+place; its return value is ignored. Choosing between a `cmaf` and a `locmaf`
+encoding of the same rendition is a typical use; see the LOCMAF section under
+[Supported Packagings](#supported-packagings).
+
+
+## Full Configuration Example
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      fingerprintUri: '',           // Set for self-signed cert servers
+      namespaces: ['live', 'ch1'], // Known namespace; leave [] to auto-discover
+      authorizationToken: '',       // Bearer token if required by server
+      version: shaka.config.MsfVersion.AUTO, // Version negotiation strategy
+      catalogPreprocessor: (catalog) => {}, // Modifies the catalog in place
+    }
+  }
+});
+```
+
+
+## DRM with MoQ
+
+DRM configuration for MoQ streams works exactly like DASH or HLS. DRM
+information is carried in the **catalog** via `contentProtections` entries
+(which include the key system UUID, PSSH, and license server URL). Shaka
+extracts this automatically and populates its DRM subsystem.
+
+You only need to provide additional DRM configuration if the catalog does not
+include the license server URL, or if you require advanced options such as
+hardware robustness or custom headers:
+
+```js
+player.configure({
+  drm: {
+    servers: {
+      'com.widevine.alpha': 'https://license.example.com/widevine',
+      'com.microsoft.playready': 'https://license.example.com/playready',
+    },
+    advanced: {
+      'com.widevine.alpha': {
+        videoRobustness: ['HW_SECURE_ALL'],
+        audioRobustness: ['SW_SECURE_CRYPTO'],
+      }
+    }
+  },
+  manifest: {
+    msf: {
+      namespaces: ['live', 'encrypted-channel'],
+      authorizationToken: 'my-token',
+    }
+  }
+});
+
+await player.load(uri, null, 'application/msf');
+```
+
+
+## Testing with a Local Relay
+
+When running a local MoQT relay with a self-signed TLS certificate, use the
+`fingerprintUri` option:
+
+1. Generate a self-signed certificate and export its SHA-256 fingerprint as a
+   hex string (no colons, no spaces) into a plain-text file, e.g.
+   `cert.hex`.
+2. Serve that file from an HTTPS endpoint accessible to the browser.
+3. Configure Shaka:
+
+```js
+player.configure({
+  manifest: {
+    msf: {
+      fingerprintUri: 'https://localhost:4443/cert.hex',
+      namespaces: ['test'],
+    }
+  }
+});
+
+await player.load('https://localhost:4433/moq', null, 'application/msf');
+```
